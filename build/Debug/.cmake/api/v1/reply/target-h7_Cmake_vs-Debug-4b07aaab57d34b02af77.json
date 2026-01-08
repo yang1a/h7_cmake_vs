@@ -11,7 +11,9 @@
 		"commands" : 
 		[
 			"add_executable",
-			"target_link_libraries"
+			"target_link_libraries",
+			"target_include_directories",
+			"target_sources"
 		],
 		"files" : 
 		[
@@ -32,6 +34,18 @@
 				"command" : 1,
 				"file" : 0,
 				"line" : 64,
+				"parent" : 0
+			},
+			{
+				"command" : 2,
+				"file" : 0,
+				"line" : 54,
+				"parent" : 0
+			},
+			{
+				"command" : 3,
+				"file" : 0,
+				"line" : 49,
 				"parent" : 0
 			}
 		]
@@ -74,6 +88,10 @@
 			],
 			"includes" : 
 			[
+				{
+					"backtrace" : 3,
+					"path" : "D:/shengchuan/h7_Cmake_vs/Core/Inc"
+				},
 				{
 					"backtrace" : 2,
 					"path" : "D:/shengchuan/h7_Cmake_vs/cmake/stm32cubemx/../../Core/Inc"
@@ -143,7 +161,8 @@
 				34,
 				35,
 				36,
-				37
+				37,
+				38
 			]
 		},
 		{
@@ -171,6 +190,10 @@
 			"includes" : 
 			[
 				{
+					"backtrace" : 3,
+					"path" : "D:/shengchuan/h7_Cmake_vs/Core/Inc"
+				},
+				{
 					"backtrace" : 2,
 					"path" : "D:/shengchuan/h7_Cmake_vs/cmake/stm32cubemx/../../Core/Inc"
 				},
@@ -194,7 +217,7 @@
 			"language" : "ASM",
 			"sourceIndexes" : 
 			[
-				38
+				39
 			]
 		}
 	],
@@ -271,19 +294,26 @@
 				34,
 				35,
 				36,
-				37
+				37,
+				38
 			]
 		},
 		{
 			"name" : "",
 			"sourceIndexes" : 
 			[
-				38
+				39
 			]
 		}
 	],
 	"sources" : 
 	[
+		{
+			"backtrace" : 4,
+			"compileGroupIndex" : 0,
+			"path" : "Core/Src/system/system_config.c",
+			"sourceGroupIndex" : 0
+		},
 		{
 			"backtrace" : 2,
 			"compileGroupIndex" : 0,

@@ -166,6 +166,17 @@ SECTIONS
     __bss_end__ = _ebss;
   } >DTCMRAM
 
+  /* DMA buffers section in D1 domain RAM for DMA access */
+  .dma_buffer (NOLOAD) :
+  {
+    . = ALIGN(32);
+    _sdma_buffer = .;
+    *(.dma_buffer)
+    *(.dma_buffer*)
+    . = ALIGN(32);
+    _edma_buffer = .;
+  } >RAM_D1
+
   /* User_heap_stack section, used to check that there is enough RAM left */
   ._user_heap_stack :
   {

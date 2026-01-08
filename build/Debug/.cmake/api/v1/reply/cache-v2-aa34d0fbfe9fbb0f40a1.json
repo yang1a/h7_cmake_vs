@@ -1223,7 +1223,7 @@
 				}
 			],
 			"type" : "UNINITIALIZED",
-			"value" : "cmake/gcc-arm-none-eabi"
+			"value" : "D:/shengchuan/h7_Cmake_vs/cmake/gcc-arm-none-eabi.cmake"
 		},
 		{
 			"name" : "CMAKE_VERBOSE_MAKEFILE",
