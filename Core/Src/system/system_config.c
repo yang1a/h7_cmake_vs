@@ -62,7 +62,7 @@ void MPU_Config(void)
 
   HAL_MPU_Disable();
 
-  /* Configure MPU for external SDRAM region */
+  
   MPU_InitStruct.Enable = MPU_REGION_ENABLE;
   MPU_InitStruct.Number = MPU_REGION_NUMBER0;
   MPU_InitStruct.BaseAddress = 0xC0000000;
@@ -76,7 +76,7 @@ void MPU_Config(void)
   MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
 
-  /* Configure MPU for RAM_D1 (AXI SRAM) for DMA access */
+  
   MPU_InitStruct.Enable = MPU_REGION_ENABLE;
   MPU_InitStruct.Number = MPU_REGION_NUMBER1;
   MPU_InitStruct.BaseAddress = 0x24000000;

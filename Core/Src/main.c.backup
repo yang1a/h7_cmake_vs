@@ -1,0 +1,507 @@
+/* USER CODE BEGIN Header */
+/*
+ * main.c - STM32H7 2-mic Sound Localization (Stable FINAL)
+ * Left  mic: PC4 (ADC2_INP4)
+ * Right mic: PB1 (ADC2_INP5)
+ * Fs: 48kHz (TIM2 TRGO -> ADC2)
+ * Servo: TIM3_CH1 (PA6)
+ *
+ * FIXES in this version:
+ *  1) DO NOT reject lag=0. lag=0 is valid => FRONT.
+ *  2) Find best NON-ZERO peak and compare with corr0:
+ *     if (bestNonZeroCorr - corr0) > MARGIN => use non-zero lag
+ *     else => use lag=0
+ *  3) Print with integers only (avoid %f issues)
+ *  4) Servo CCR is ARR-based (no unit mismatch)
+ */
+/* USER CODE END Header */
+
+#include "main.h"
+#include "adc.h"
+#include "dma.h"
+#include "tim.h"
+#include "usart.h"
+#include "gpio.h"
+
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+
+/* ---------------- Config ---------------- */
+#define FS_HZ 48000.0f
+#define MIC_DISTANCE_M 0.12f
+#define SOUND_SPEED 343.0f
+
+#define FRAME_SAMPLES_PER_CH 1024
+#define DMA_WORDS_PER_FRAME (FRAME_SAMPLES_PER_CH * 2) // L0 R0 L1 R1 ...
+#define DMA_TOTAL_WORDS (DMA_WORDS_PER_FRAME * 2)      // half + full
+
+#define MAX_LAG_SAMPLES 17
+#define LAG_SMOOTH_ALPHA 0.75f
+
+/* ---------- High-pass ---------- */
+#define HP_A 0.995f
+
+/* ---------- Noise learning ---------- */
+#define NOISE_LEARN_FRAMES 200u
+#define NOISE_ALPHA 0.98f
+#define NOISE_UPDATE_LIMIT 1.20f
+#define GATE_ADD_M 3000u // gateM = noiseM + 3000 (单位：pwr/1e6)
+
+/* ---------- NCC decision (IMPORTANT) ---------- */
+/* 只有当“非0峰”明显强于 corr0 才认为有方向，否则 FRONT */
+#define NONZERO_MARGIN_MIL 10 // (bestNonZeroCorr - corr0) > 10/1000 => 0.010
+
+/* 可选：非0峰本身不能太低（否则噪声也会产生假峰） */
+#define NONZERO_CORR_MIN_MIL 600 // bestNonZeroCorr > 0.600
+
+/* ---------- Servo ---------- */
+#define SERVO_MIN_US 500
+#define SERVO_MAX_US 2500
+#define SERVO_MAX_STEP_DEG 4.0f
+
+/* DMA buffer in dedicated section */
+__attribute__((section(".dma_buffer"), aligned(32))) static uint16_t adc_dma_buf[DMA_TOTAL_WORDS];
+
+static int16_t frameL[FRAME_SAMPLES_PER_CH];
+static int16_t frameR[FRAME_SAMPLES_PER_CH];
+
+static volatile uint8_t frame_ready = 0;
+static const uint16_t *frame_ptr = NULL;
+
+static float lag_f = 0.0f;
+static float servo_angle_f = 0.0f;
+
+/* noise floor (unit: pwrM = pwr/1e6) */
+static float noiseM_f = 0.0f;
+static uint32_t learn_cnt = 0;
+
+/* HP state */
+typedef struct
+{
+  float prev_x;
+  float prev_y;
+} HP1State;
+
+static HP1State hpL = {0}, hpR = {0};
+
+extern void SystemClock_Config(void);
+extern void MPU_Config(void);
+
+
+static inline void cache_invalidate_dma_buf(const uint16_t *p, size_t bytes)
+{
+  SCB_InvalidateDCache_by_Addr((uint32_t *)p, (int32_t)bytes);
+}
+
+/* ---------- helpers ---------- */
+static void deinterleave_to_i16(const uint16_t *src, int16_t *left, int16_t *right, int n)
+{
+  for (int i = 0; i < n; i++)
+  {
+    left[i] = (int16_t)((int32_t)src[2 * i + 0] - 32768);
+    right[i] = (int16_t)((int32_t)src[2 * i + 1] - 32768);
+  }
+}
+
+static void remove_mean_i16(int16_t *x, int n)
+{
+  int64_t sum = 0;
+  for (int i = 0; i < n; i++)
+    sum += x[i];
+  int32_t mean = (int32_t)(sum / n);
+  for (int i = 0; i < n; i++)
+    x[i] = (int16_t)(x[i] - mean);
+}
+
+static inline int16_t hp1_iir_i16(int16_t x, HP1State *st)
+{
+  float y = (float)x - st->prev_x + HP_A * st->prev_y;
+  st->prev_x = (float)x;
+  st->prev_y = y;
+
+  if (y > 32767.0f)
+    y = 32767.0f;
+  if (y < -32768.0f)
+    y = -32768.0f;
+  return (int16_t)y;
+}
+
+static uint64_t frame_power_u64(const int16_t *L, const int16_t *R, int n)
+{
+  uint64_t p = 0;
+  for (int i = 0; i < n; i++)
+  {
+    int32_t a = L[i];
+    int32_t b = R[i];
+    p += (uint64_t)(a * a) + (uint64_t)(b * b);
+  }
+  return p;
+}
+
+static uint64_t diff_power_u64(const int16_t *L, const int16_t *R, int n)
+{
+  uint64_t p = 0;
+  for (int i = 0; i < n; i++)
+  {
+    int32_t d = (int32_t)L[i] - (int32_t)R[i];
+    p += (uint64_t)(d * d);
+  }
+  return p;
+}
+
+static void minmax_i16(const int16_t *x, int n, int16_t *mn, int16_t *mx)
+{
+  int16_t a = x[0], b = x[0];
+  for (int i = 1; i < n; i++)
+  {
+    if (x[i] < a)
+      a = x[i];
+    if (x[i] > b)
+      b = x[i];
+  }
+  *mn = a;
+  *mx = b;
+}
+
+/* ---------- NCC (find corr0 + best non-zero peak) ---------- */
+typedef struct
+{
+  float corr0;
+  int bestLag;    // final chosen lag (may be 0)
+  float bestCorr; // final chosen corr
+  int bestNonZeroLag;
+  float bestNonZeroCorr;
+  float secondNonZeroCorr;
+} NccPick;
+
+static NccPick ncc_pick_lag(const int16_t *L, const int16_t *R, int n, int maxLag)
+{
+  double eL = 0.0, eR = 0.0;
+  for (int i = 0; i < n; i++)
+  {
+    double a = (double)L[i];
+    double b = (double)R[i];
+    eL += a * a;
+    eR += b * b;
+  }
+
+  double denom = sqrt(eL * eR);
+  if (denom < 1e-9)
+  {
+    NccPick z = {0};
+    return z;
+  }
+
+  double corr0 = 0.0;
+  int bestNZLag = 0;
+  double bestNZ = -1e9;
+  double secondNZ = -1e9;
+
+  for (int lag = -maxLag; lag <= maxLag; lag++)
+  {
+    double dot = 0.0;
+
+    int start = (lag < 0) ? -lag : 0;
+    int end = (lag > 0) ? (n - lag) : n;
+
+    for (int i = start; i < end; i++)
+    {
+      dot += (double)L[i] * (double)R[i + lag];
+    }
+
+    double corr = dot / denom;
+
+    if (lag == 0)
+    {
+      corr0 = corr;
+      continue;
+    }
+
+    if (corr > bestNZ)
+    {
+      secondNZ = bestNZ;
+      bestNZ = corr;
+      bestNZLag = lag;
+    }
+    else if (corr > secondNZ)
+    {
+      secondNZ = corr;
+    }
+  }
+
+  NccPick out;
+  out.corr0 = (float)corr0;
+  out.bestNonZeroLag = bestNZLag;
+  out.bestNonZeroCorr = (float)bestNZ;
+  out.secondNonZeroCorr = (float)secondNZ;
+
+  /* Decide final lag:
+     - If non-zero peak is clearly better than corr0 => choose non-zero
+     - else choose 0 (FRONT) */
+  out.bestLag = 0;
+  out.bestCorr = (float)corr0;
+
+  float d = out.bestNonZeroCorr - out.corr0;
+  if ((out.bestNonZeroCorr > (NONZERO_CORR_MIN_MIL / 1000.0f)) &&
+      (d > (NONZERO_MARGIN_MIL / 1000.0f)))
+  {
+    out.bestLag = out.bestNonZeroLag;
+    out.bestCorr = out.bestNonZeroCorr;
+  }
+
+  return out;
+}
+
+static float lag_to_angle_deg(float lag_samples)
+{
+  float dt = lag_samples / FS_HZ;
+  float s = (SOUND_SPEED * dt) / MIC_DISTANCE_M;
+  if (s > 1.0f)
+    s = 1.0f;
+  if (s < -1.0f)
+    s = -1.0f;
+  return asinf(s) * 57.2957795f;
+}
+
+/* ---------- Servo (ARR-based us -> CCR) ---------- */
+static float clampf(float x, float lo, float hi)
+{
+  if (x < lo)
+    return lo;
+  if (x > hi)
+    return hi;
+  return x;
+}
+
+static void servo_set_pulse_us(uint16_t pulse_us)
+{
+  uint32_t arr = __HAL_TIM_GET_AUTORELOAD(&htim3);
+  uint32_t period_counts = arr + 1u;
+
+  if (pulse_us < SERVO_MIN_US)
+    pulse_us = SERVO_MIN_US;
+  if (pulse_us > SERVO_MAX_US)
+    pulse_us = SERVO_MAX_US;
+
+  // 50Hz => 20000us
+  uint32_t ccr = (uint32_t)((((uint32_t)pulse_us) * period_counts + 10000u) / 20000u);
+  if (ccr > arr)
+    ccr = arr;
+
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, ccr);
+}
+
+static void servo_set_angle_deg(float angle)
+{
+  if (angle > 90.0f)
+    angle = 90.0f;
+  if (angle < -90.0f)
+    angle = -90.0f;
+
+  float t = (angle + 90.0f) / 180.0f; // 0..1
+  uint16_t pulse = (uint16_t)((float)SERVO_MIN_US + t * (float)(SERVO_MAX_US - SERVO_MIN_US) + 0.5f);
+  servo_set_pulse_us(pulse);
+}
+
+/* ---------- DMA callbacks ---------- */
+void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
+{
+  if (hadc->Instance == ADC2)
+  {
+    frame_ptr = &adc_dma_buf[0];
+    frame_ready = 1;
+  }
+}
+
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
+{
+  if (hadc->Instance == ADC2)
+  {
+    frame_ptr = &adc_dma_buf[DMA_WORDS_PER_FRAME];
+    frame_ready = 1;
+  }
+}
+
+/* ---------- Main ---------- */
+int main(void)
+{
+  MPU_Config();
+  SCB_EnableICache();
+  SCB_EnableDCache();
+
+  HAL_Init();
+  SystemClock_Config();
+
+  MX_GPIO_Init();
+  MX_DMA_Init();
+  MX_USART1_UART_Init();
+  MX_ADC2_Init();
+  MX_TIM2_Init();
+  MX_TIM3_Init();
+
+  printf("\r\n=== H7 Sound Localization (FINAL lag0 OK) ===\r\n");
+  printf("Fs=%lu Frame=%u/ch maxLag=%u\r\n",
+         (unsigned long)FS_HZ, (unsigned)FRAME_SAMPLES_PER_CH, (unsigned)MAX_LAG_SAMPLES);
+  printf("Gate: learn=%u, gateM=noiseM+%lu\r\n",
+         (unsigned)NOISE_LEARN_FRAMES, (unsigned long)GATE_ADD_M);
+  printf("Pick rule: non0Corr>=%u/1000 AND (non0-c0)>%u/1000\r\n",
+         (unsigned)NONZERO_CORR_MIN_MIL, (unsigned)NONZERO_MARGIN_MIL);
+  printf("Servo: TIM3_CH1(PA6) ARR-based map, step=%.0f deg/frame\r\n", (double)SERVO_MAX_STEP_DEG);
+
+  if (HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1) != HAL_OK)
+    Error_Handler();
+
+  // Servo self-test
+  printf("Servo self-test...\r\n");
+  servo_set_angle_deg(-60.0f);
+  HAL_Delay(500);
+  servo_set_angle_deg(0.0f);
+  HAL_Delay(500);
+  servo_set_angle_deg(60.0f);
+  HAL_Delay(500);
+  servo_set_angle_deg(0.0f);
+  HAL_Delay(300);
+  servo_angle_f = 0.0f;
+
+  if (HAL_ADCEx_Calibration_Start(&hadc2, ADC_CALIB_OFFSET, ADC_SINGLE_ENDED) != HAL_OK)
+    Error_Handler();
+
+  SCB_CleanDCache_by_Addr((uint32_t *)adc_dma_buf, sizeof(adc_dma_buf));
+
+  if (HAL_ADC_Start_DMA(&hadc2, (uint32_t *)adc_dma_buf, DMA_TOTAL_WORDS) != HAL_OK)
+    Error_Handler();
+
+  if (HAL_TIM_Base_Start(&htim2) != HAL_OK)
+    Error_Handler();
+
+  printf("Started. Keep quiet ~4s for noise learning, then clap near LEFT/RIGHT.\r\n");
+
+  uint32_t cnt = 0;
+  uint32_t ok_cnt = 0;
+
+  while (1)
+  {
+    if (!frame_ready)
+      continue;
+    frame_ready = 0;
+
+    cache_invalidate_dma_buf(frame_ptr, DMA_WORDS_PER_FRAME * sizeof(uint16_t));
+    deinterleave_to_i16(frame_ptr, frameL, frameR, FRAME_SAMPLES_PER_CH);
+
+    // occasional raw verify
+    if ((cnt % 200u) == 0u)
+    {
+      int16_t lmin, lmax, rmin, rmax;
+      minmax_i16(frameL, FRAME_SAMPLES_PER_CH, &lmin, &lmax);
+      minmax_i16(frameR, FRAME_SAMPLES_PER_CH, &rmin, &rmax);
+      uint32_t diffM = (uint32_t)(diff_power_u64(frameL, frameR, FRAME_SAMPLES_PER_CH) / 1000000ULL);
+      printf("RAW L[%d,%d] R[%d,%d] diffM=%lu\r\n",
+             lmin, lmax, rmin, rmax, (unsigned long)diffM);
+    }
+
+    // preprocess
+    remove_mean_i16(frameL, FRAME_SAMPLES_PER_CH);
+    remove_mean_i16(frameR, FRAME_SAMPLES_PER_CH);
+
+    for (int i = 0; i < FRAME_SAMPLES_PER_CH; i++)
+    {
+      frameL[i] = hp1_iir_i16(frameL[i], &hpL);
+      frameR[i] = hp1_iir_i16(frameR[i], &hpR);
+    }
+
+    // power
+    uint64_t pwr = frame_power_u64(frameL, frameR, FRAME_SAMPLES_PER_CH);
+    uint32_t pwrM_u = (uint32_t)(pwr / 1000000ULL);
+
+    // learn noise
+    if (learn_cnt < NOISE_LEARN_FRAMES)
+    {
+      float pwrM = (float)pwrM_u;
+
+      if (noiseM_f < 1e-3f)
+        noiseM_f = pwrM;
+
+      if (pwrM < noiseM_f * NOISE_UPDATE_LIMIT)
+      {
+        noiseM_f = NOISE_ALPHA * noiseM_f + (1.0f - NOISE_ALPHA) * pwrM;
+      }
+      learn_cnt++;
+
+      if ((cnt % 20u) == 0u)
+      {
+        uint32_t noiseM_u = (uint32_t)(noiseM_f + 0.5f);
+        printf("LEARN %lu/%lu noiseM=%lu pwrM=%lu\r\n",
+               (unsigned long)learn_cnt, (unsigned long)NOISE_LEARN_FRAMES,
+               (unsigned long)noiseM_u, (unsigned long)pwrM_u);
+      }
+
+      cnt++;
+      continue;
+    }
+
+    uint32_t noiseM_u = (uint32_t)(noiseM_f + 0.5f);
+    uint32_t gateM_u = noiseM_u + (uint32_t)GATE_ADD_M;
+
+    if ((cnt % 20u) == 0u)
+    {
+      printf("DBG noiseM=%lu gateM=%lu pwrM=%lu ok=%lu\r\n",
+             (unsigned long)noiseM_u, (unsigned long)gateM_u,
+             (unsigned long)pwrM_u, (unsigned long)ok_cnt);
+    }
+
+    // not loud enough => hold last
+    if (pwrM_u < gateM_u)
+    {
+      cnt++;
+      continue;
+    }
+
+    // NCC pick
+    NccPick pk = ncc_pick_lag(frameL, frameR, FRAME_SAMPLES_PER_CH, MAX_LAG_SAMPLES);
+
+    // smoothing (even lag=0 is valid)
+    lag_f = LAG_SMOOTH_ALPHA * lag_f + (1.0f - LAG_SMOOTH_ALPHA) * (float)pk.bestLag;
+
+    float angle = lag_to_angle_deg(lag_f);
+
+    // servo rate limit
+    float delta = angle - servo_angle_f;
+    delta = clampf(delta, -SERVO_MAX_STEP_DEG, SERVO_MAX_STEP_DEG);
+    servo_angle_f += delta;
+    servo_set_angle_deg(servo_angle_f);
+
+    // direction text
+    const char *dir =
+        (lag_f > 0.5f) ? "LEFT" : (lag_f < -0.5f) ? "RIGHT"
+                                                  : "FRONT";
+
+    // integer print
+    int c0_m = (int)(pk.corr0 * 1000.0f);
+    int nz_m = (int)(pk.bestNonZeroCorr * 1000.0f);
+    int d_m = nz_m - c0_m;
+    int best_m = (int)(pk.bestCorr * 1000.0f);
+
+    if ((cnt % 3u) == 0u)
+    { // reduce spam
+      printf("OK pwrM=%lu lag=%d lag_f=%d/100 corr=%d/1000 c0=%d/1000 nz=%d/1000 d=%d/1000 dir=%s servo=%d/10\r\n",
+             (unsigned long)pwrM_u,
+             pk.bestLag,
+             (int)(lag_f * 100.0f),
+             best_m, c0_m, nz_m, d_m,
+             dir,
+             (int)(servo_angle_f * 10.0f));
+    }
+
+    ok_cnt++;
+    cnt++;
+  }
+}
+
+void Error_Handler(void)
+{
+  __disable_irq();
+  while (1)
+  {
+  }
+}

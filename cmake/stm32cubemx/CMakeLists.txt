@@ -26,7 +26,6 @@ target_sources(stm32cubemx INTERFACE
     ../../Core/Src/adc.c
     ../../Core/Src/dma.c
     ../../Core/Src/dma2d.c
-    ../../Core/Src/rtc.c
     ../../Core/Src/tim.c
     ../../Core/Src/usart.c
     ../../Core/Src/stm32h7xx_it.c

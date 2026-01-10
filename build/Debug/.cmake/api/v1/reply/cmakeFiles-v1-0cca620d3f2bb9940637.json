@@ -12,9 +12,6 @@
 			"path" : "build/Debug/CMakeFiles/4.2.1/CMakeSystem.cmake"
 		},
 		{
-			"path" : "cmake/gcc-arm-none-eabi.cmake"
-		},
-		{
 			"isCMake" : true,
 			"isExternal" : true,
 			"path" : "C:/Program Files/CMake/share/cmake-4.2/Modules/CMakeSystemSpecificInitialize.cmake"

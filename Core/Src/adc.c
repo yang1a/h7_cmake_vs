@@ -1,25 +1,25 @@
-/* Includes ------------------------------------------------------------------*/
+
 #include "adc.h"
 
 ADC_HandleTypeDef hadc2;
 DMA_HandleTypeDef hdma_adc2;
 
-/* ADC2 init function */
+
 void MX_ADC2_Init(void)
 {
 
-  /* USER CODE BEGIN ADC2_Init 0 */
+  
 
-  /* USER CODE END ADC2_Init 0 */
+  
 
   ADC_ChannelConfTypeDef sConfig = {0};
 
-  /* USER CODE BEGIN ADC2_Init 1 */
+  
 
-  /* USER CODE END ADC2_Init 1 */
+  
 
-  /** Common config
-  */
+  
+
   hadc2.Instance = ADC2;
   hadc2.Init.ClockPrescaler = ADC_CLOCK_ASYNC_DIV1;
   hadc2.Init.Resolution = ADC_RESOLUTION_16B;
@@ -40,8 +40,8 @@ void MX_ADC2_Init(void)
     Error_Handler();
   }
 
-  /** Configure Regular Channel
-  */
+  
+
   sConfig.Channel = ADC_CHANNEL_4;
   sConfig.Rank = ADC_REGULAR_RANK_1;
   sConfig.SamplingTime = ADC_SAMPLETIME_64CYCLES_5;
@@ -54,17 +54,17 @@ void MX_ADC2_Init(void)
     Error_Handler();
   }
 
-  /** Configure Regular Channel
-  */
+  
+
   sConfig.Channel = ADC_CHANNEL_5;
   sConfig.Rank = ADC_REGULAR_RANK_2;
   if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN ADC2_Init 2 */
+  
 
-  /* USER CODE END ADC2_Init 2 */
+  
 
 }
 
@@ -75,12 +75,12 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* adcHandle)
   RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
   if(adcHandle->Instance==ADC2)
   {
-  /* USER CODE BEGIN ADC2_MspInit 0 */
+  
 
-  /* USER CODE END ADC2_MspInit 0 */
+  
 
-  /** Initializes the peripherals clock
-  */
+  
+
     PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_ADC;
     PeriphClkInitStruct.PLL2.PLL2M = 32;
     PeriphClkInitStruct.PLL2.PLL2N = 129;
@@ -96,15 +96,15 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* adcHandle)
       Error_Handler();
     }
 
-    /* ADC2 clock enable */
+    
     __HAL_RCC_ADC12_CLK_ENABLE();
 
     __HAL_RCC_GPIOC_CLK_ENABLE();
     __HAL_RCC_GPIOB_CLK_ENABLE();
-    /**ADC2 GPIO Configuration
-    PC4     ------> ADC2_INP4
-    PB1     ------> ADC2_INP5
-    */
+    
+
+
+
     GPIO_InitStruct.Pin = GPIO_PIN_4;
     GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
@@ -115,8 +115,8 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* adcHandle)
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-    /* ADC2 DMA Init */
-    /* ADC2 Init */
+    
+    
     hdma_adc2.Instance = DMA1_Stream0;
     hdma_adc2.Init.Request = DMA_REQUEST_ADC2;
     hdma_adc2.Init.Direction = DMA_PERIPH_TO_MEMORY;
@@ -134,9 +134,9 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* adcHandle)
 
     __HAL_LINKDMA(adcHandle,DMA_Handle,hdma_adc2);
 
-  /* USER CODE BEGIN ADC2_MspInit 1 */
+  
 
-  /* USER CODE END ADC2_MspInit 1 */
+  
   }
 }
 
@@ -145,25 +145,25 @@ void HAL_ADC_MspDeInit(ADC_HandleTypeDef* adcHandle)
 
   if(adcHandle->Instance==ADC2)
   {
-  /* USER CODE BEGIN ADC2_MspDeInit 0 */
+  
 
-  /* USER CODE END ADC2_MspDeInit 0 */
-    /* Peripheral clock disable */
+  
+    
     __HAL_RCC_ADC12_CLK_DISABLE();
 
-    /**ADC2 GPIO Configuration
-    PC4     ------> ADC2_INP4
-    PB1     ------> ADC2_INP5
-    */
+    
+
+
+
     HAL_GPIO_DeInit(GPIOC, GPIO_PIN_4);
 
     HAL_GPIO_DeInit(GPIOB, GPIO_PIN_1);
 
-    /* ADC2 DMA DeInit */
+    
     HAL_DMA_DeInit(adcHandle->DMA_Handle);
-  /* USER CODE BEGIN ADC2_MspDeInit 1 */
+  
 
-  /* USER CODE END ADC2_MspDeInit 1 */
+  
   }
 }
 

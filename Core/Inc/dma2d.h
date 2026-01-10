@@ -1,4 +1,4 @@
-/* Define to prevent recursive inclusion -------------------------------------*/
+
 #ifndef __DMA2D_H__
 #define __DMA2D_H__
 
@@ -6,14 +6,14 @@
 extern "C" {
 #endif
 
-/* Includes ------------------------------------------------------------------*/
+
 #include "main.h"
 
 extern DMA2D_HandleTypeDef hdma2d;
 
-/* USER CODE BEGIN Private defines */
 
-/* USER CODE END Private defines */
+
+
 
 void MX_DMA2D_Init(void);
 
@@ -21,5 +21,5 @@ void MX_DMA2D_Init(void);
 }
 #endif
 
-#endif /* __DMA2D_H__ */
+#endif 
 

@@ -48,6 +48,11 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/system/system_config.c
+    Core/Src/audio_io.c
+    Core/Src/tdoa_ncc.c
+    Core/Src/doa.c
+    Core/Src/servo.c
+    Core/Src/app.c
 )
 
 # Add include paths
